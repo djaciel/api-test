@@ -1,24 +1,21 @@
 /**
- * Brale API — Transfer Pagination Bug
- * ====================================
+ * Brale API — Transfer Pagination
+ * ================================
  *
- * Bug: GET /accounts/{id}/transfers?page[next]={cursor} returns the same
- * results as page 1. The cursor parameter is ignored by the API.
+ * Bug (reported 2026-03-25):
+ *   GET /accounts/{id}/transfers?page[next]={cursor} returns the same
+ *   results as page 1. The cursor parameter is ignored by the API.
  *
- * Expected behavior:
- *   - Page 1 returns transfers [A, B, C, D, E]
- *   - Page 2 (with cursor from page 1) returns transfers [F, G, H, I]
+ * Fix (suggested by Brale):
+ *   Use page[after] instead of page[next]. Confirmed working 2026-03-30.
  *
- * Actual behavior:
- *   - Page 1 returns transfers [A, B, C, D, E]
- *   - Page 2 returns transfers [A, B, C, D, E] (identical)
+ * This test validates both:
+ *   - page[next]  — the documented param (broken)
+ *   - page[after] — the suggested fix (working)
  *
  * Prerequisites:
  *   - .env file with BRALE_CLIENT_ID and BRALE_CLIENT_SECRET
  *   - At least 6 transfers in the account (more than one page)
- *
- * Reported: 2026-03-25
- * Status: Open — pending Brale fix
  *
  * Run: pnpm test
  */
@@ -100,11 +97,12 @@ async function getTransfers(
   token: string,
   accountId: string,
   pageSize: number,
-  pageNext?: string,
+  cursor?: string,
+  cursorParam: 'page[next]' | 'page[after]' = 'page[next]',
 ): Promise<TransferListResponse> {
   const url = new URL(`${API_BASE}/accounts/${accountId}/transfers`);
   url.searchParams.set('page[size]', String(pageSize));
-  if (pageNext) url.searchParams.set('page[next]', pageNext);
+  if (cursor) url.searchParams.set(cursorParam, cursor);
   const response = await fetch(url.toString(), {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -265,6 +263,77 @@ describe('Brale API — Transfer Pagination', () => {
     expect(page3Ids).not.toEqual(page1Ids);
     expect(page3Ids).not.toEqual(page2Ids);
   }, 20_000);
+
+  // -------------------------------------------------------------------------
+  // page[after] tests (the fix suggested by Brale)
+  // -------------------------------------------------------------------------
+
+  it('FIX: page[after] page 2 should return different results than page 1', async () => {
+    const page1 = await getTransfers(token, accountId, PAGE_SIZE);
+    const cursor = page1.pagination?.next;
+
+    if (!cursor) {
+      console.warn('Skipping: not enough transfers for pagination test (need > 5)');
+      return;
+    }
+
+    const page2 = await getTransfers(token, accountId, PAGE_SIZE, cursor, 'page[after]');
+
+    const page1Ids = page1.transfers.map((t) => t.id);
+    const page2Ids = page2.transfers.map((t) => t.id);
+
+    const overlapping = page2Ids.filter((id) => page1Ids.includes(id));
+
+    console.log('\n========== page[after] TEST: Page 1 vs Page 2 (size=%d) ==========', PAGE_SIZE);
+    console.log('Page 1 IDs (%d):', page1Ids.length, page1Ids);
+    console.log('Page 2 IDs (%d):', page2Ids.length, page2Ids);
+    console.log('Overlapping: %d', overlapping.length);
+    console.log('Are pages identical?', JSON.stringify(page1Ids) === JSON.stringify(page2Ids) ? 'YES (BUG)' : 'NO (OK)');
+    console.log('====================================================================\n');
+
+    expect(page2Ids).not.toEqual(page1Ids);
+    expect(overlapping.length).toBe(0);
+  }, 15_000);
+
+  it('FIX: page[after] 3 pages should have zero overlap', async () => {
+    const page1 = await getTransfers(token, accountId, PAGE_SIZE);
+    const cursor1 = page1.pagination?.next;
+
+    if (!cursor1) {
+      console.warn('Skipping: not enough transfers for 3-page test (need > 10)');
+      return;
+    }
+
+    const page2 = await getTransfers(token, accountId, PAGE_SIZE, cursor1, 'page[after]');
+    const cursor2 = page2.pagination?.next;
+
+    if (!cursor2) {
+      console.warn('Skipping: not enough transfers for page 3 test (need > 10)');
+      return;
+    }
+
+    const page3 = await getTransfers(token, accountId, PAGE_SIZE, cursor2, 'page[after]');
+
+    const page1Ids = page1.transfers.map((t) => t.id);
+    const page2Ids = page2.transfers.map((t) => t.id);
+    const page3Ids = page3.transfers.map((t) => t.id);
+
+    const allIds = [...page1Ids, ...page2Ids, ...page3Ids];
+    const uniqueTotal = new Set(allIds);
+
+    console.log('\n========== page[after] TEST: Pages 1, 2, 3 (size=%d) ==========', PAGE_SIZE);
+    console.log('Page 1 IDs (%d):', page1Ids.length, page1Ids);
+    console.log('Page 2 IDs (%d):', page2Ids.length, page2Ids);
+    console.log('Page 3 IDs (%d):', page3Ids.length, page3Ids);
+    console.log('Total: %d, Unique: %d', allIds.length, uniqueTotal.size);
+    console.log('================================================================\n');
+
+    expect(uniqueTotal.size).toBe(allIds.length);
+  }, 20_000);
+
+  // -------------------------------------------------------------------------
+  // General tests
+  // -------------------------------------------------------------------------
 
   it('should return transfers sorted by created_at descending', async () => {
     const result = await getTransfers(token, accountId, 20);
